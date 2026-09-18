@@ -121,3 +121,28 @@ Build jobs have read-only repository permissions. Only the tag-triggered release
 job can write releases. Official checkout/artifact actions are pinned to commit
 SHAs. Standard GitHub-hosted runners are used. Inherited upstream workflows are
 disabled in this fork; the native workflow is its only active pipeline.
+
+
+## Protected bridge ABI 2
+
+The ABI number is independent of upstream Luau and Colony script API versions.
+Creation uses a size-tagged options structure. Memory, payload, live references,
+host calls and cached handles are bounded. Statistics describe the Lua allocator
+(current/peak), live exported references, cached userdata and host-call counts.
+
+Wire tag 7 carries three little-endian uint32 values: kind (1=item, 2=behaviour),
+catalog scope and index. Userdata is interned per VM; it contains no host pointer.
+The host validates catalog ownership, kind and liveness before performing work.
+Scripts cannot construct these userdata values.
+
+Exported functions are interned by Lua identity. Release them with host_release;
+all aliases share one host-owned reference. IDs are monotonic and never reused.
+Failed encoding rolls back new references that have not reached the host.
+
+Callbacks return a structured error code and borrowed output pointer/length.
+The output remains valid until the next callback or outer host_call return;
+native decoding is synchronous, after managed code returns. Callbacks are never
+retried. No Lua API or exceptions may cross the managed callback boundary.
+Lua pcall/rethrow preserves host error categories through opaque error objects.
+Messages are bounded to 4096 bytes and tracebacks to 8192 bytes. Constant tables
+are recursively frozen before scripts execute.

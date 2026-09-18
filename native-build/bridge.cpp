@@ -322,7 +322,7 @@ int invokeImpl(lua_State* L) {
     if(v->expired) { v->errorKind=v->terminalKind; luaL_error(L,"script execution budget exceeded"); }
     rollback(v);
     v->output.clear(); v->nodes=0;
-    int n=lua_gettop(co); u32(v->output,n);
+    int n=lua_gettop(co); if(n>64) { v->errorKind=LUAU_RESOURCE_LIMIT; throw std::runtime_error("result count limit exceeded"); } u32(v->output,n);
     for(int i=1;i<=n;++i) encode(co,i,v->output,0);
     if(v->output.size()>v->payloadLimit) { v->errorKind=LUAU_RESOURCE_LIMIT; throw std::runtime_error("result payload limit exceeded"); }
     return 0;
