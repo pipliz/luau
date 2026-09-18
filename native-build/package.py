@@ -20,7 +20,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--rid", required=True, choices=["win-x64", "linux-x64", "osx-x64", "osx-arm64"])
     parser.add_argument("--stage", type=Path, default=Path("build/stage"))
-    parser.add_argument("--toolchain", type=Path, default=Path("build/toolchain.json"))
+    parser.add_argument("--toolchain", type=Path, default=Path("build/toolchain-Release.json"))
     args = parser.parse_args()
     version = json.loads(Path("native-build/version.json").read_text())
     subprocess.run(["git", "merge-base", "--is-ancestor", version["upstream_commit"], "HEAD"], check=True)

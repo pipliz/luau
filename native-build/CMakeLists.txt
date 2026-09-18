@@ -61,7 +61,7 @@ install(FILES
     luau_native.h DESTINATION include)
 install(FILES "${LUAU_ROOT}/LICENSE.txt" "${LUAU_ROOT}/lua_LICENSE.txt" DESTINATION licenses)
 install(FILES README.md version.json DESTINATION .)
-file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/toolchain.json" CONTENT
+file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/toolchain-$<CONFIG>.json" CONTENT
     "{\"compiler\":\"${CMAKE_CXX_COMPILER_ID}\",\"compiler_version\":\"${CMAKE_CXX_COMPILER_VERSION}\",\"cmake_version\":\"${CMAKE_VERSION}\",\"configuration\":\"$<CONFIG>\"}\n")
 
 include(CTest)
