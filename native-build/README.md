@@ -11,7 +11,7 @@ Each platform gets **one shared library** containing the Luau interpreter and
 source-to-bytecode compiler. There is no JIT/native code generator, type checker,
 CLI or filesystem-based `require` implementation in this library. The compiler
 turns `.luau` source into bytecode for the interpreter; it does not produce native
-machine code. The host must implement module loading if it needs `require`.
+machine code. The protected bridge implements manifest-only module loading for `require`.
 
 | Runtime identifier | Library | Build/test host |
 | --- | --- | --- |
@@ -20,7 +20,7 @@ machine code. The host must implement module loading if it needs `require`.
 | osx-x64 | `lib/libluau.dylib` | macOS 15, Intel |
 | osx-arm64 | `lib/libluau.dylib` | macOS 15, Apple Silicon |
 
-The macOS deployment target is 13.0; execution is tested on the listed CI host,
+The macOS deployment target is 12.0; execution is tested on the listed CI host,
 not every older OS. Linux uses the system libc/libstdc++ from the Ubuntu 22.04
 build environment. Windows links its MSVC runtime statically. These are separate
 Mac architecture packages, not a universal binary. Mobile, WebGL and consoles
@@ -36,7 +36,35 @@ upstream commit, fork commit, compiler, build configuration, ABI settings and CI
 run. Checksums detect changes; they do not by themselves establish authenticity.
 Obtain them from the same trusted GitHub release/build and inspect its source.
 
-## ABI contract for future bindings
+## ABI contract
+
+Managed hosts use `bridge.h` (`luau_host_abi() == 1`), not direct VM stack calls.
+The bridge owns the allocator, protected boundaries, module cache, deadlines and
+function references. Managed callbacks receive copied values and return a copied
+value buffer or negative UTF-8 error length. Lua allocation/error handling happens
+only before or after that managed frame. The public raw API remains for native
+consumers; it is not safe to call allocating raw Lua APIs from managed callbacks.
+
+Wire values are little endian: a uint32 count followed by values. Tags are nil=0,
+false=1, true=2, double=3 (8 bytes), UTF-8=4 (uint32 byte length, bytes), table=5
+(uint32 pair count, key/value pairs), function=6 (uint32 VM-owned reference,
+native-to-host only). The returned buffer lasts until the next invocation. Modules
+return a function or table; only registered source is compiled. Handles expire
+with their VM. Calls and disposal are serialized by the owning managed thread.
+
+Limits: 512 KiB/module, 1024 modules/VM, 8 MiB/value buffer, depth 32, 200000 value
+nodes, 4096 exported function references, 10000 host calls/invocation. The caller
+supplies the Lua allocator limit and invocation deadline. Module source/compiler
+and wire buffers are outside the Lua allocator, so the host also limits source
+totals and VM counts. Compilation is synchronous and source-bounded, not subject
+to a hard preemptive deadline. No coroutine scheduler is exposed. Timeout tests
+cover infinite loops inside repeated `pcall`, not just uncaught script errors.
+
+All bridge sources are additive in `native-build`; upstream VM/compiler sources
+remain unchanged. Review public API changes and rerun both smoke suites on each
+upstream update. Bump the ABI for incompatible bridge changes. Colony updates are
+manual: place the selected release binaries in `colonyplugins`; the game builder
+does not fetch or update them.
 
 - Public VM/compiler entry points use C linkage and the normal C calling
   convention (`CallingConvention.Cdecl` for future P/Invoke declarations).
@@ -75,7 +103,7 @@ python native-build/package.py --rid linux-x64
 Use the matching RID when packaging another platform. On Windows, add `-A x64`
 when configuring with Visual Studio. For Mac, also set
 `-DCMAKE_OSX_ARCHITECTURES=x86_64` or `arm64` and
-`-DCMAKE_OSX_DEPLOYMENT_TARGET=13.0`, matching CI. CMake reuses upstream source
+`-DCMAKE_OSX_DEPLOYMENT_TARGET=12.0`, matching CI. CMake reuses upstream source
 lists and compiler options but combines the selected components in a single
 shared target; upstream's separate shared-library build is not used.
 
