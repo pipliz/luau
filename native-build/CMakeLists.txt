@@ -14,7 +14,7 @@ add_subdirectory("${LUAU_ROOT}" upstream EXCLUDE_FROM_ALL)
 
 # Reuse upstream's explicit source lists, avoiding duplicated globs and archive
 # dead stripping. CodeGen, Analysis, Require and CLI are deliberately absent.
-add_library(luau SHARED free.cpp)
+add_library(luau SHARED free.cpp bridge.cpp)
 foreach(component Common Ast Bytecode Compiler VM)
     get_target_property(component_sources Luau.${component} SOURCES)
     foreach(source IN LISTS component_sources)
@@ -58,7 +58,7 @@ install(FILES
     "${LUAU_ROOT}/VM/include/lualib.h"
     "${LUAU_ROOT}/VM/include/luaconf.h"
     "${LUAU_ROOT}/Compiler/include/luacode.h"
-    luau_native.h DESTINATION include)
+    luau_native.h bridge.h DESTINATION include)
 install(FILES "${LUAU_ROOT}/LICENSE.txt" "${LUAU_ROOT}/lua_LICENSE.txt" DESTINATION licenses)
 install(FILES README.md version.json DESTINATION .)
 file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/toolchain-$<CONFIG>.json" CONTENT
@@ -69,4 +69,7 @@ if(BUILD_TESTING)
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
     add_test(NAME native-abi-smoke
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/smoke.py" "$<TARGET_FILE:luau>")
+    add_test(NAME protected-bridge-smoke
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/bridge_smoke.py" "$<TARGET_FILE:luau>")
+    set_tests_properties(protected-bridge-smoke PROPERTIES TIMEOUT 30)
 endif()
