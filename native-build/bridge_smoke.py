@@ -4,8 +4,11 @@ import struct
 import sys
 
 lib = c.CDLL(sys.argv[1])
-callback_type = c.CFUNCTYPE(c.c_int, c.c_void_p, c.c_int, c.c_void_p, c.c_int, c.c_void_p, c.c_int)
-lib.luau_host_create.argtypes = [c.c_uint64, callback_type, c.c_void_p]
+callback_type = c.CFUNCTYPE(c.c_int, c.c_void_p, c.c_int, c.c_void_p, c.c_int, c.POINTER(c.c_void_p), c.POINTER(c.c_int))
+class Options(c.Structure):
+    _fields_=[("size",c.c_uint32),("abi",c.c_uint32),("memory",c.c_uint64),("payload",c.c_uint32),("refs",c.c_uint32),("calls",c.c_uint32),("handles",c.c_uint32)]
+options=Options(c.sizeof(Options),2,8*1024*1024,8*1024*1024,4096,10000,65536)
+lib.luau_host_create.argtypes = [c.POINTER(Options), callback_type, c.c_void_p]
 lib.luau_host_create.restype = c.c_void_p
 lib.luau_host_destroy.argtypes = [c.c_void_p]
 lib.luau_host_bind.argtypes = [c.c_void_p, c.c_char_p, c.c_int]
@@ -14,15 +17,15 @@ lib.luau_host_call.argtypes = [c.c_void_p, c.c_char_p, c.c_char_p, c.c_int, c.c_
 lib.luau_host_error.argtypes = [c.c_void_p]
 lib.luau_host_error.restype = c.c_char_p
 
+callback_buffer=None
 @callback_type
-def host(user, operation, args, size, output, capacity):
-    if operation == 1:
-        error = b"managed host rejected request"
-        c.memmove(output, error, len(error))
-        return -len(error)
-    response = struct.pack("<IBd", 1, 3, 42)
-    c.memmove(output, response, len(response))
-    return len(response)
+def host(user, operation, args, size, output, output_size):
+    global callback_buffer
+    response=b"managed host rejected request" if operation==1 else struct.pack("<IBd",1,3,42)
+    callback_buffer=c.create_string_buffer(response)
+    output[0]=c.cast(callback_buffer,c.c_void_p)
+    output_size[0]=len(response)
+    return 6 if operation==1 else 0
 
 def add(vm, name, source):
     data = source.encode()
@@ -35,9 +38,9 @@ def call(vm, name, arguments=struct.pack("<I", 0), fail=False):
     assert bool(status) == fail, (name, status, error)
     return c.string_at(output, size.value) if not status else error
 
-assert lib.luau_host_abi() == 1
+assert lib.luau_host_abi() == 2
 for iteration in range(3):
-    vm = lib.luau_host_create(8 * 1024 * 1024, host, None)
+    vm = lib.luau_host_create(c.byref(options), host, None)
     assert vm
     try:
         assert lib.luau_host_bind(vm, b"answer", 0) == 0
