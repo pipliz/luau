@@ -67,3 +67,50 @@ for iteration in range(3):
     finally:
         lib.luau_host_destroy(vm)
 print("Protected host ABI: values, modules, sandbox, errors, OOM, uncatchable budgets, teardown passed")
+
+class Stats(c.Structure):
+    _fields_=[("size",c.c_uint32),("refs",c.c_uint32),("used",c.c_uint64),("peak",c.c_uint64),("calls",c.c_uint64),("last_calls",c.c_uint32),("handles",c.c_uint32)]
+lib.luau_host_statistics.argtypes=[c.c_void_p,c.POINTER(Stats)]
+lib.luau_host_release.argtypes=[c.c_void_p,c.c_int]
+lib.luau_host_error_kind.argtypes=[c.c_void_p]
+def stats(vm):
+    value=Stats(size=c.sizeof(Stats))
+    assert lib.luau_host_statistics(vm,c.byref(value))==0
+    return value
+vm=lib.luau_host_create(c.byref(options),host,None)
+try:
+    lib.luau_host_bind(vm,b"answer",0)
+    lib.luau_host_bind(vm,b"reject",1)
+    add(vm,"handles","return function(a,b) assert(type(a)=='userdata' and a==b); local t={[a]=42}; assert(t[b]==42); return a end")
+    handle=struct.pack("<BIII",7,1,123,456)
+    assert call(vm,"handles",struct.pack("<I",2)+handle+handle)==struct.pack("<I",1)+handle
+    assert stats(vm).handles==1
+    add(vm,"refs","local f=function() return 42 end; return function() return f,f end")
+    first=call(vm,"refs")
+    assert first[4]==6 and first[9]==6
+    ref=struct.unpack_from("<I",first,5)[0]
+    assert ref==struct.unpack_from("<I",first,10)[0]
+    for _ in range(4200):
+        assert call(vm,"refs")==first
+    assert stats(vm).refs==1
+    assert lib.luau_host_release(vm,ref)==0
+    assert stats(vm).refs==0
+    assert lib.luau_host_release(vm,ref)==4
+    assert call(vm,"refs")!=first
+    add(vm,"failedrefs","return function() local t={}; t.self=t; return function() end,t end")
+    before=stats(vm).refs
+    for _ in range(20): call(vm,"failedrefs",fail=True)
+    assert stats(vm).refs==before
+    add(vm,"caught","return function() pcall(reject); error('ordinary script error') end")
+    call(vm,"caught",fail=True)
+    assert lib.luau_host_error_kind(vm)==1
+    add(vm,"rethrow","return function() local ok,e=pcall(reject); error(e) end")
+    call(vm,"rethrow",fail=True)
+    assert lib.luau_host_error_kind(vm)==6
+    add(vm,"good2","return function() return answer() end")
+    call(vm,"good2")
+    value=stats(vm)
+    assert value.peak>=value.used>0 and value.calls>=3 and value.last_calls==1
+finally:
+    lib.luau_host_destroy(vm)
+print("ABI 2: userdata identity, bounded references, release, rollback, structured errors and statistics passed")

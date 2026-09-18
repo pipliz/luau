@@ -20,6 +20,8 @@ constexpr int MaxSource = 512 * 1024;
 constexpr int MaxNodes = 200000;
 struct Handle { uint32_t kind, scope, index; };
 constexpr int HandleTag = 1;
+constexpr int ErrorTag = 2;
+struct Error { int kind; char message[4097]; };
 struct Function { int ref; const void* identity; };
 struct Module { std::string source; int ref = 0; bool loading = false; };
 }
@@ -31,7 +33,7 @@ struct luau_host_vm {
     std::map<std::string, Module> modules;
     std::vector<uint8_t> output, callbackInput;
     std::string error, traceback;
-    int errorKind = LUAU_OK;
+    int errorKind = LUAU_OK, terminalKind = LUAU_OK;
     uint32_t payloadLimit=MaxWire, referenceLimit=4096, callLimit=10000, handleLimit=65536;
     uint64_t totalCalls=0;
     int nextReference=1;
@@ -60,11 +62,32 @@ void* alloc(void* ud, void* ptr, size_t oldSize, size_t newSize) {
     if (result) { v->used = v->used - oldSize + newSize; v->peak=std::max(v->peak,v->used); }
     return result;
 }
+int errorString(lua_State* L) {
+    auto* e=static_cast<Error*>(lua_touserdatatagged(L,1,ErrorTag));
+    lua_pushstring(L,e?e->message:"script error"); return 1;
+}
+void raise(lua_State* L,int kind,const char* message,size_t length) {
+    auto* e=static_cast<Error*>(lua_newuserdatatagged(L,sizeof(Error),ErrorTag));
+    e->kind=kind; size_t count=std::min(length,size_t(4096));
+    memcpy(e->message,message,count); e->message[count]=0;
+    luaL_getmetatable(L,"bridge.error"); lua_setmetatable(L,-2);
+    lua_error(L);
+}
+void rollback(luau_host_vm* v) {
+    for(int id:v->pendingRefs) {
+        auto found=v->functions.find(id);
+        if(found!=v->functions.end()) {
+            if(found->second.ref) lua_unref(v->state,found->second.ref);
+            v->functionIds.erase(found->second.identity); v->functions.erase(found);
+        }
+    }
+    v->pendingRefs.clear();
+}
 void interrupt(lua_State* L, int gc) {
     auto* v = vmof(L);
     if (gc >= 0) return;
     if (v->expired || std::chrono::steady_clock::now() >= v->deadline) {
-        v->expired = true; v->errorKind=LUAU_TIMEOUT;
+        v->expired = true; if(!v->terminalKind) v->terminalKind=LUAU_TIMEOUT; v->errorKind=v->terminalKind;
         if (lua_isyieldable(L)) lua_break(L);
         else luaL_error(L, "script execution budget exceeded");
     }
@@ -156,7 +179,9 @@ void decode(lua_State* L, int depth) {
 int hostImpl(lua_State* L) {
     auto* v=vmof(L);
     ++v->totalCalls;
-    if (v->expired || ++v->calls>int(v->callLimit)) { v->expired=true; v->errorKind=LUAU_RESOURCE_LIMIT; luaL_error(L,"host call budget exceeded"); }
+    if (v->expired || ++v->calls>int(v->callLimit)) { v->expired=true; v->terminalKind=LUAU_RESOURCE_LIMIT; v->errorKind=LUAU_RESOURCE_LIMIT; raise(L,LUAU_RESOURCE_LIMIT,"host call budget exceeded",25); }
+    rollback(v);
+    v->errorKind=LUAU_OK;
     v->callbackInput.clear(); v->nodes=0;
     int count=lua_gettop(L); if(count>64) { v->errorKind=LUAU_BAD_ARGUMENT; luaL_error(L,"argument count limit exceeded"); }
     u32(v->callbackInput,count);
@@ -167,7 +192,7 @@ int hostImpl(lua_State* L) {
     int error=v->callback(v->user,lua_tointeger(L,lua_upvalueindex(1)),v->callbackInput.data(),int(v->callbackInput.size()),&output,&n);
     // Managed code has returned; decoding and raising Lua errors are safe now.
     if(n<0 || n>int(v->payloadLimit) || (!output && n)) { v->errorKind=LUAU_BAD_ARGUMENT; luaL_error(L,"invalid managed callback response"); }
-    if(error) { v->errorKind=(error>=LUAU_SCRIPT_ERROR && error<=LUAU_RESOURCE_LIMIT)?error:LUAU_HOST_ERROR; lua_pushlstring(L,reinterpret_cast<const char*>(output),size_t(std::min(n,4096))); lua_error(L); }
+    if(error) { v->errorKind=(error>=LUAU_SCRIPT_ERROR && error<=LUAU_RESOURCE_LIMIT)?error:LUAU_HOST_ERROR; raise(L,v->errorKind,reinterpret_cast<const char*>(output),size_t(n)); }
     v->input=output; v->inputSize=n; v->cursor=0; v->nodes=0;
     uint32_t results=read32(v); if(results>64) throw std::runtime_error("host result count limit exceeded");
     for(uint32_t i=0;i<results;++i) decode(L,0);
@@ -178,7 +203,9 @@ int host(lua_State* L) {
     try { return hostImpl(L); }
     catch(const std::exception& e) { vmof(L)->error=e.what(); }
     catch(...) { vmof(L)->error="native host bridge failure"; }
-    luaL_error(L,"%s",vmof(L)->error.c_str());
+    rollback(vmof(L));
+    raise(L,vmof(L)->errorKind ? vmof(L)->errorKind : LUAU_BAD_ARGUMENT,vmof(L)->error.data(),vmof(L)->error.size());
+    return 0;
 }
 void loadModule(lua_State* L, Module* module, const char* name);
 int requireModule(lua_State* L) {
@@ -214,8 +241,9 @@ void loadModule(lua_State* L, Module* module, const char* name) {
     if(!status) status=lua_resume(co,L,0);
     if(status) {
         v->traceback=lua_debugtrace(co);
+        v->errorKind=v->expired ? v->terminalKind : LUAU_SCRIPT_ERROR;
         if(status==LUA_ERRMEM) v->errorKind=LUAU_MEMORY_LIMIT;
-        if(status==LUA_BREAK || status==LUA_YIELD) v->errorKind=LUAU_TIMEOUT;
+        if(status==LUA_BREAK || status==LUA_YIELD) v->errorKind=v->terminalKind?v->terminalKind:LUAU_TIMEOUT;
         if(status==LUA_BREAK || status==LUA_YIELD) luaL_error(L,"module execution budget exceeded or yielded");
         lua_xmove(co,L,1); lua_error(L);
     }
@@ -225,6 +253,10 @@ void loadModule(lua_State* L, Module* module, const char* name) {
 }
 int initialize(lua_State* L) {
     luaL_openlibs(L);
+    luaL_newmetatable(L,"bridge.error");
+    lua_pushcfunction(L,errorString,"error"); lua_setfield(L,-2,"__tostring");
+    lua_pushboolean(L,false); lua_setfield(L,-2,"__metatable");
+    lua_setreadonly(L,-1,true); lua_pop(L,1);
     // No independent coroutine scheduler; script execution is synchronous.
     const char* removed[]={"coroutine","debug","getfenv","setfenv","collectgarbage","newproxy",nullptr};
     for(int i=0;removed[i];++i) { lua_pushnil(L); lua_setglobal(L,removed[i]); }
@@ -281,12 +313,14 @@ int invokeImpl(lua_State* L) {
     int status=lua_resume(co,L,int(count));
     if(status) {
         v->traceback=lua_debugtrace(co);
+        v->errorKind=v->expired ? v->terminalKind : LUAU_SCRIPT_ERROR;
         if(status==LUA_ERRMEM) v->errorKind=LUAU_MEMORY_LIMIT;
-        if(status==LUA_BREAK || status==LUA_YIELD) v->errorKind=LUAU_TIMEOUT;
+        if(status==LUA_BREAK || status==LUA_YIELD) v->errorKind=v->terminalKind?v->terminalKind:LUAU_TIMEOUT;
         if(status==LUA_BREAK || status==LUA_YIELD) luaL_error(L,"script execution budget exceeded or yielded");
         lua_xmove(co,L,1); lua_error(L);
     }
-    if(v->expired) luaL_error(L,"script execution budget exceeded");
+    if(v->expired) { v->errorKind=v->terminalKind; luaL_error(L,"script execution budget exceeded"); }
+    rollback(v);
     v->output.clear(); v->nodes=0;
     int n=lua_gettop(co); u32(v->output,n);
     for(int i=1;i<=n;++i) encode(co,i,v->output,0);
@@ -302,22 +336,24 @@ int invoke(lua_State* L) {
 int protect(luau_host_vm* v,lua_CFunction f) {
     int status=lua_cpcall(v->state,f,nullptr);
     free(v->bytecode); v->bytecode=nullptr;
-    if(status) { if(status==LUA_ERRMEM) v->errorKind=LUAU_MEMORY_LIMIT; else if(!v->errorKind) v->errorKind=LUAU_SCRIPT_ERROR; const char* s=lua_tostring(v->state,-1); v->error=s?s:"native VM allocation failure"; }
+    if(status) { if(status==LUA_ERRMEM) v->errorKind=LUAU_MEMORY_LIMIT; else if(!v->errorKind) v->errorKind=LUAU_SCRIPT_ERROR; auto* structured=static_cast<Error*>(lua_touserdatatagged(v->state,-1,ErrorTag));
+        if(structured) { v->errorKind=structured->kind; v->error=structured->message; }
+        else { const char* s=lua_tostring(v->state,-1); v->error=s?s:"native VM allocation failure"; } }
     if(status) {
         if(v->error.size()>4096) v->error.resize(4096);
         if(v->traceback.size()>8192) v->traceback.resize(8192);
-        for(int id:v->pendingRefs) {
-            auto found=v->functions.find(id);
-            if(found!=v->functions.end()) {
-                if(found->second.ref) lua_unref(v->state,found->second.ref);
-                v->functionIds.erase(found->second.identity); v->functions.erase(found);
-            }
-        }
+        rollback(v);
     }
     v->pendingRefs.clear();
     lua_settop(v->state,0);
     for(auto& entry:v->modules) entry.second.loading=false;
     return status;
+}
+}
+namespace {
+int invalid(luau_host_vm* v,const char* message) {
+    if(v) { v->errorKind=LUAU_BAD_ARGUMENT; v->error=message; v->traceback.clear(); }
+    return LUAU_BAD_ARGUMENT;
 }
 }
 int luau_host_abi() { return 2; }
@@ -342,17 +378,17 @@ luau_host_vm* luau_host_create(const luau_host_options* options,luau_host_callba
 }
 void luau_host_destroy(luau_host_vm* v) { if(v) { if(v->state) lua_close(v->state); delete v; } }
 int luau_host_bind(luau_host_vm* v,const char* name,int op) {
-    if(!v || v->busy || v->sealed) return -1;
+    if(!v || v->busy || v->sealed || !name) return invalid(v,"Cannot bind after sealing or while executing");
     v->name=name; v->operation=op; return protect(v,bind);
 }
 int luau_host_module(luau_host_vm* v,const char* name,const char* source,int length) {
-    if(!v || v->busy || length<0 || length>MaxSource) return -1;
+    if(!v || v->busy || !name || !source || length<0 || length>MaxSource) return invalid(v,"Invalid module arguments");
     try { if(v->modules.size()>=1024 || v->modules.count(name)) throw std::runtime_error("duplicate module or module limit exceeded"); v->modules[name].source.assign(source,length); return 0; }
-    catch(const std::exception& e) { v->error=e.what(); return -1; }
+    catch(const std::exception& e) { v->error=e.what(); v->errorKind=LUAU_BAD_ARGUMENT; return -1; }
 }
 int luau_host_call(luau_host_vm* v,const char* name,const char* member,int ref,const uint8_t* args,int length,int ms,const uint8_t** result,int* size) {
-    if(!v || v->busy || length<4 || length>int(v->payloadLimit) || ms<1 || ms>5000) return -1;
-    v->error.clear(); v->traceback.clear(); v->errorKind=LUAU_OK;
+    if(!v || v->busy || !name || !args || !result || !size || length<4 || length>int(v->payloadLimit) || ms<1 || ms>5000) return invalid(v,"Invalid call arguments");
+    v->error.clear(); v->traceback.clear(); v->errorKind=LUAU_OK; v->terminalKind=LUAU_OK;
     v->busy=true; v->name=name; v->member=member; v->reference=ref;
     v->input=args; v->inputSize=length; v->cursor=0; v->nodes=0; v->calls=0; v->expired=false;
     v->deadline=std::chrono::steady_clock::now()+std::chrono::milliseconds(ms);

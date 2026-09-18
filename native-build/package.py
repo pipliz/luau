@@ -37,7 +37,7 @@ def main():
         "run_id": os.environ.get("GITHUB_RUN_ID"),
         "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
         "runtime_identifier": args.rid,
-        "bridge_abi": 1,
+        "bridge_abi": 2,
         "deployment_baseline": "macOS 12.0" if args.rid.startswith("osx") else "Ubuntu 22.04" if args.rid == "linux-x64" else "Windows x64, static MSVC CRT",
         "toolchain": json.loads(args.toolchain.read_text()),
         "features": {"interpreter": True, "bytecode_compiler": True, "native_codegen": False,
