@@ -177,7 +177,13 @@ int initialize(lua_State* L) {
     return 0;
 }
 int bind(lua_State* L) {
-    auto* v=vmof(L); lua_pushinteger(L,v->operation); lua_pushcclosure(L,host,v->name,1); lua_setglobal(L,v->name); return 0;
+    auto* v=vmof(L);
+    if(strncmp(v->name,"game.",5)==0) {
+        lua_getglobal(L,"game");
+        if(lua_isnil(L,-1)) { lua_pop(L,1); lua_newtable(L); lua_pushvalue(L,-1); lua_setglobal(L,"game"); }
+        lua_pushinteger(L,v->operation); lua_pushcclosure(L,host,v->name,1); lua_setfield(L,-2,v->name+5);
+    } else { lua_pushinteger(L,v->operation); lua_pushcclosure(L,host,v->name,1); lua_setglobal(L,v->name); }
+    return 0;
 }
 int invokeImpl(lua_State* L) {
     auto* v=vmof(L);
