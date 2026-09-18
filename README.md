@@ -1,3 +1,15 @@
+# Luau native binaries for Colony
+
+[![Native libraries](https://github.com/pipliz/luau/actions/workflows/native-libraries.yml/badge.svg)](https://github.com/pipliz/luau/actions/workflows/native-libraries.yml)
+
+This fork packages one interpreter + bytecode-compiler shared library per desktop
+platform, with **no JIT**. Unity-specific C# bindings will live in Colony.
+
+**[Download releases](https://github.com/pipliz/luau/releases)** ·
+**[Build, platform and ABI documentation](native-build/README.md)**
+
+The upstream Luau project description follows.
+
 Luau ![CI](https://github.com/luau-lang/luau/actions/workflows/build.yml/badge.svg) [![codecov](https://codecov.io/gh/luau-lang/luau/branch/master/graph/badge.svg)](https://codecov.io/gh/luau-lang/luau)
 ====
 
